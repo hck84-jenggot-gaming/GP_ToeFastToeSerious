@@ -85,6 +85,9 @@ io.on("connection", (socket) => {
     const room = allRooms.find((r) => r.roomId === roomId);
     if (!room) return;
 
+    // Mark the game as finished to prevent double scoring
+    room.gameFinished = true;
+
     try {
       // Determine which player won
       let winnerName;
@@ -101,9 +104,12 @@ io.on("connection", (socket) => {
           room.player2.socket.id === socket.id
             ? currentUser.playerName
             : room.player2.playerName;
+      } else if (winner === "opponentLeft") {
+        // This case happens when opponent leaves during active game
+        winnerName = data.winnerName;
       }
 
-      if (winnerName) {
+      if (winnerName && winner !== "draw") {
         // Update the winner's totalWins in the database
         await incrementUserWins(winnerName);
         console.log(`Updated wins for player: ${winnerName}`);
@@ -162,7 +168,8 @@ io.on("connection", (socket) => {
           [null, null, null],
           [null, null, null],
           [null, null, null],
-        ], // Add game state to room
+        ],
+        gameFinished: false, // Add this flag
       };
 
       allRooms.push(room);
@@ -198,32 +205,32 @@ io.on("connection", (socket) => {
 
       // Find and clean up the room
       for (let index = 0; index < allRooms.length; index++) {
-        const { player1, player2 } = allRooms[index];
+        const room = allRooms[index];
+        const { player1, player2 } = room;
 
-        if (player1.socket.id === socket.id) {
-          player2.socket.emit("opponentLeftMatch");
+        // Check if the disconnecting player was in this room
+        if (
+          player1.socket.id === socket.id ||
+          player2.socket.id === socket.id
+        ) {
+          const disconnectingPlayer =
+            player1.socket.id === socket.id ? player1 : player2;
+          const remainingPlayer =
+            player1.socket.id === socket.id ? player2 : player1;
 
-          // Player 2 wins by forfeit
-          try {
-            await incrementUserWins(player2.playerName);
-            console.log(`${player2.playerName} wins by forfeit`);
-          } catch (error) {
-            console.error("Error updating forfeit win:", error);
-          }
+          // Notify the remaining player
+          remainingPlayer.socket.emit("opponentLeftMatch");
 
-          allRooms.splice(index, 1);
-          break;
-        }
-
-        if (player2.socket.id === socket.id) {
-          player1.socket.emit("opponentLeftMatch");
-
-          // Player 1 wins by forfeit
-          try {
-            await incrementUserWins(player1.playerName);
-            console.log(`${player1.playerName} wins by forfeit`);
-          } catch (error) {
-            console.error("Error updating forfeit win:", error);
+          // Only award forfeit win if game was NOT already finished
+          if (!room.gameFinished) {
+            try {
+              await incrementUserWins(remainingPlayer.playerName);
+              console.log(`${remainingPlayer.playerName} wins by forfeit`);
+            } catch (error) {
+              console.error("Error updating forfeit win:", error);
+            }
+          } else {
+            console.log(`Game was already finished, no forfeit win awarded`);
           }
 
           allRooms.splice(index, 1);
@@ -232,6 +239,29 @@ io.on("connection", (socket) => {
       }
 
       delete allUsers[socket.id];
+    }
+  });
+
+  socket.on("requestGameReset", (data) => {
+    const { roomId } = data;
+    const room = allRooms.find((r) => r.roomId === roomId);
+
+    if (room) {
+      // Reset room state
+      room.gameState = [
+        [null, null, null],
+        [null, null, null],
+        [null, null, null],
+      ];
+      room.currentTurn = "cross";
+      room.aiUsed = false;
+      room.gameFinished = false; // Reset this flag
+
+      // Notify both players
+      room.player1.socket.emit("gameResetConfirmed");
+      room.player2.socket.emit("gameResetConfirmed");
+
+      console.log(`Game reset for room: ${roomId}`);
     }
   });
 
